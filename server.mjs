@@ -11,8 +11,11 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { URL } from 'node:url';
 
-const VERSION = '1.0.0';
-const MODEL = process.env.OPENAI_MODEL || 'gpt-6-astra';
+const VERSION = '1.1.0';
+const REQUIRED_MODEL = 'gpt-6-astra';
+const CONFIGURED_MODEL = process.env.OPENAI_MODEL || REQUIRED_MODEL;
+const MODEL = REQUIRED_MODEL;
+const MODEL_LOCK_OK = CONFIGURED_MODEL === REQUIRED_MODEL;
 const ENVELOPE_VERSION = process.env.ENVELOPE_VERSION || 'worldq-envelope-v1';
 const PORT = Number(process.env.PORT || 8787);
 const AGENT_ID = 'astra-01';
@@ -266,6 +269,11 @@ function redact(value) {
 
 async function callAstra({ mandate, evidence, effort, remainingMs, previousId }) {
   const key = process.env.OPENAI_API_KEY;
+  if (!MODEL_LOCK_OK) {
+    const err = new Error(`Astra model lock rejected OPENAI_MODEL=${CONFIGURED_MODEL}; required ${REQUIRED_MODEL}`);
+    err.code = 'MODEL_LOCK';
+    throw err;
+  }
   if (!key) {
     const err = new Error('OPENAI_API_KEY is not configured on the gateway');
     err.code = 'NO_KEY';
@@ -344,6 +352,7 @@ async function runMission(mission) {
   const torqueDecisions = [];
   const toolsUsed = [];
   const stages = [];
+  const reasoningEfforts = [];
   let requeries = 0;
   let openaiResponseId = '';
   let modelUsed = MODEL;
@@ -435,12 +444,13 @@ async function runMission(mission) {
       .join('\n\n');
 
     const runAstra = async (effort, previousId) => {
+      reasoningEfforts.push(effort);
       emit(mission, {
         kind: 'tool.called',
         summary: `gpt-6-astra Responses API · effort=${effort}`,
         layer: 'CITY',
         qragStep: 'execute',
-        tool: 'web_search',
+        tool: 'openai.responses',
       });
       const payload = await callAstra({
         mandate: mission.mandate,
@@ -503,7 +513,7 @@ async function runMission(mission) {
     stages.push('verify');
     const checks = {
       hasResponseId: Boolean(openaiResponseId),
-      modelIsAstra: String(modelUsed).includes('gpt-6-astra'),
+      modelIsAstra: String(modelUsed) === REQUIRED_MODEL,
       hasOutput: lastText.length >= 80,
       toolsWithinBudget: toolsUsed.length <= mission.envelope.maxToolCalls,
       requeriesWithinBudget: requeries <= mission.envelope.maxRequeries,
@@ -529,7 +539,7 @@ async function runMission(mission) {
       if (u2.tokens) tokens = (tokens || 0) + u2.tokens;
       if (u2.costUsd) costUsd = Number((((costUsd || 0) + u2.costUsd)).toFixed(6));
       checks.hasResponseId = Boolean(openaiResponseId);
-      checks.modelIsAstra = String(modelUsed).includes('gpt-6-astra');
+      checks.modelIsAstra = String(modelUsed) === REQUIRED_MODEL;
       checks.hasOutput = lastText.length >= 80;
       checks.toolsWithinBudget = toolsUsed.length <= mission.envelope.maxToolCalls;
       checks.notTimedOut = !timedOut();
@@ -578,7 +588,10 @@ async function runMission(mission) {
     receiptId,
     missionId: mission.id,
     timestamp: new Date().toISOString(),
-    model: MODEL,
+    model: openaiResponseId ? modelUsed : MODEL,
+    requiredModel: REQUIRED_MODEL,
+    astraExecuted: Boolean(openaiResponseId),
+    reasoningEfforts: [...new Set(reasoningEfforts)],
     openaiResponseId: openaiResponseId || null,
     mandateHash: mission.envelope.mandateHash,
     executionEnvelopeVersion: ENVELOPE_VERSION,
@@ -600,7 +613,7 @@ async function runMission(mission) {
 
   emit(mission, {
     kind: 'receipt.issued',
-    summary: `Receipt ${receiptId} · ${receipt.verificationResult} · ${latencyMs}ms`,
+    summary: `Receipt ${receiptId} · ${receipt.verificationResult} · ${MODEL} · effort=${reasoningEfforts.at(-1) || 'n/a'} · ${latencyMs}ms`,
     layer: 'WORLDQ',
     receiptId,
     ...(typeof tokens === 'number' ? { tokens } : {}),
@@ -656,10 +669,12 @@ function startMission(mandate, envelopeInput) {
 
 function health() {
   return {
-    status: process.env.OPENAI_API_KEY ? 'ok' : 'degraded',
+    status: process.env.OPENAI_API_KEY && MODEL_LOCK_OK ? 'ok' : 'degraded',
     service: 'worldq-astra-gateway',
     version: VERSION,
     model: MODEL,
+    configuredModel: CONFIGURED_MODEL,
+    modelLockOk: MODEL_LOCK_OK,
     envelopeVersion: ENVELOPE_VERSION,
     competitionMode: true,
     limits: {
@@ -693,7 +708,7 @@ const server = http.createServer(async (req, res) => {
         service: 'worldq-astra-gateway',
         version: VERSION,
         model: MODEL,
-        endpoints: ['GET /health', 'POST /api/missions', 'GET /api/missions/:id/events'],
+        endpoints: ['GET /health', 'POST /api/missions', 'GET /api/missions/:id', 'GET /api/missions/:id/events'],
       });
       return;
     }
@@ -724,6 +739,24 @@ const server = http.createServer(async (req, res) => {
       }
       const mission = startMission(mandate, body.envelope || {});
       json(res, req, 202, { missionId: mission.id });
+      return;
+    }
+
+    const missionMatch = path.match(/^\/api\/missions\/([^/]+)$/);
+    if (req.method === 'GET' && missionMatch) {
+      const mission = missions.get(decodeURIComponent(missionMatch[1]));
+      if (!mission) {
+        json(res, req, 404, { error: 'mission_not_found' });
+        return;
+      }
+      json(res, req, 200, {
+        missionId: mission.id,
+        status: mission.status,
+        model: MODEL,
+        modelLockOk: MODEL_LOCK_OK,
+        createdAt: mission.createdAt,
+        receipt: mission.receipt || null,
+      });
       return;
     }
 
