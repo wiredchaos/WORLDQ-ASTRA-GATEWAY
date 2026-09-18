@@ -1,0 +1,14 @@
+{
+  "name": "worldq-astra-gateway",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Production GPT-6 Astra backend gateway for AGENTROPOLIS WORLDQ",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
