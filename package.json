@@ -1,9 +1,9 @@
 {
-  "name": "worldq-astra-gateway",
+  "name": "worldq-gateway",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
-  "description": "Production GPT-6 Astra backend gateway for AGENTROPOLIS WORLDQ",
+  "description": "Provider-agnostic zero-paid-API WORLDQ execution gateway for AGENTROPOLIS",
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs"
